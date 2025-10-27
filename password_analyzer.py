@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-Password Strength Analyzer + Production-grade Custom Wordlist Generator (interactive + CLI)
+Password Strength Analyzer + Production-grade Custom Wordlist Generator (Interactive + CLI)
 
-Key features:
- - Full CLI options (--name, --pet, --favorite, --dob, --years, --extra, --out, --gzip, --maxwords, --generate-only, --add-reversed, --add-repeats)
- - If no CLI parts provided, asks interactive questions to collect personal info (name, dob, pet, favorites, extra, years)
- - If CLI parts provided, it offers to add more interactively
- - Uses zxcvbn for password analysis and feeds user inputs to it
- - Bounded leetspeak/capitalization/permutation rules
- - NLTK tokenization optional (if installed)
- - gzip output option
+Key Features:
+ - CLI & Interactive hybrid operation
+ - zxcvbn-based password strength analysis with user input context
+ - Smart custom wordlist generation using:
+     → Leetspeak, capitalization, prefix/suffix combos, year appends
+     → Optional reversed and repeated patterns
+ - Optional gzip compression for large wordlists
+ - Bounded and performance-optimized generation (~20k words max)
+ - Clean CLI help and modern interactive UX
 """
 
 import argparse
 import itertools
-import os
 import sys
 import gzip
 from datetime import datetime
 
-# zxcvbn import
+# ------------------ Imports & Optional Dependencies ------------------
 try:
     from zxcvbn import zxcvbn
-except Exception as e:
+except Exception:
     print("ERROR: zxcvbn not installed. Run: pip install zxcvbn")
-    raise
+    sys.exit(1)
 
-# optional nltk
 try:
     import nltk
     from nltk.tokenize import word_tokenize
@@ -51,285 +50,207 @@ MAX_COMBINED_WORDS = 20000
 MAX_COMBO_PARTS = 3
 # ---------------------------------------------------
 
+
 def permutations_case(word):
-    s = set()
-    s.add(word)
-    s.add(word.lower())
-    s.add(word.upper())
-    s.add(word.capitalize())
+    """Generate case variations for a given word."""
+    s = {word, word.lower(), word.upper(), word.capitalize()}
     if len(word) > 1:
         s.add(word[0].upper() + word[1:].lower())
     return sorted(s)
 
+
 def leet_variants(word, max_variants=MAX_LEET_VARIANTS_PER_WORD):
-    """
-    Bounded leet substitution variants.
-    Replace up to 2 positions (choose first alt for each replaced pos) to avoid explosion.
-    """
+    """Generate limited leetspeak variants for a word."""
     chars = list(word)
     indices = [i for i, ch in enumerate(chars) if ch in LEET_MAP]
-    variants = set([word])
+    variants = {word}
+
     # replace 1 or 2 positions
-    for r in range(1, min(3, len(indices)+1)):
+    for r in range(1, min(3, len(indices) + 1)):
         for combo in itertools.combinations(indices, r):
-            base = chars.copy()
-            # choose first substitute for each selected index (simple & fast)
+            w = chars.copy()
             for idx in combo:
                 subs = LEET_MAP.get(chars[idx], [])
                 if subs:
-                    base[idx] = subs[0]
-            variants.add("".join(base))
-    # also include a version where all mapped chars are replaced by their first mapping
-    base_all = chars.copy()
-    changed = False
+                    w[idx] = subs[0]
+            variants.add("".join(w))
+
+    # replace all mapped chars
+    w_all = chars.copy()
     for i, ch in enumerate(chars):
         if ch in LEET_MAP:
-            base_all[i] = LEET_MAP[ch][0]
-            changed = True
-    if changed:
-        variants.add("".join(base_all))
-    out = list(variants)[:max_variants]
-    return out
+            w_all[i] = LEET_MAP[ch][0]
+    variants.add("".join(w_all))
+
+    return list(variants)[:max_variants]
+
 
 def expand_years(years_arg):
+    """Expand year inputs into lists."""
     if not years_arg:
         return []
-    if len(years_arg) == 1:
-        return [int(years_arg[0])]
-    if len(years_arg) == 2:
-        a, b = int(years_arg[0]), int(years_arg[1])
-        if a <= b:
-            return list(range(a, b+1))
-        else:
-            return list(range(b, a+1))
-    return [int(y) for y in years_arg]
-
-def generate_from_parts(parts, years=None, max_words=MAX_COMBINED_WORDS, add_reversed=False, add_repeats=False):
-    years = years or []
-    words = set()
-    parts = [p for p in parts if p and p.strip()]
-    if not parts:
+    try:
+        years = [int(y) for y in years_arg]
+        if len(years) == 2 and abs(years[1] - years[0]) > 1:
+            start, end = sorted(years)
+            return list(range(start, end + 1))
+        return years
+    except Exception:
         return []
 
-    # single-part variants
-    for part in parts:
-        for form in permutations_case(part):
-            words.add(form)
-            for lv in leet_variants(form):
-                words.add(lv)
-            for suf in COMMON_SUFFIXES:
-                words.add(form + suf)
-            for pre in COMMON_PREFIXES:
-                words.add(pre + form)
-            for y in years:
-                words.add(form + str(y))
-        if add_reversed:
-            words.add(part[::-1])
-        if add_repeats:
-            words.add(part + part)
-            words.add(part * 3)
 
-    # combine parts (1..MAX_COMBO_PARTS)
+def generate_from_parts(parts, years=None, max_words=MAX_COMBINED_WORDS,
+                        add_reversed=False, add_repeats=False):
+    """Generate password wordlist combinations from given parts."""
+    years = years or []
+    words = set()
+    parts = [p for p in parts if p.strip()]
+
+    # single-part and multi-part combos
     for r in range(1, min(MAX_COMBO_PARTS, len(parts)) + 1):
         for combo in itertools.permutations(parts, r):
             base = "".join(combo)
-            for form in permutations_case(base):
-                words.add(form)
-                for lv in leet_variants(form):
-                    words.add(lv)
+            for variant in permutations_case(base):
+                words.add(variant)
+                for leet in leet_variants(variant):
+                    words.add(leet)
                 for suf in COMMON_SUFFIXES:
-                    words.add(form + suf)
+                    words.add(variant + suf)
                 for pre in COMMON_PREFIXES:
-                    words.add(pre + form)
+                    words.add(pre + variant)
                 for y in years:
-                    words.add(form + str(y))
+                    words.add(variant + str(y))
             if add_reversed:
                 words.add(base[::-1])
             if add_repeats:
-                words.add(base + base)
+                words.add(base * 2)
 
-    # optional NLTK tokenization
+    # optional tokenization
     if NLTK_AVAILABLE:
-        joined = " ".join(parts)
         try:
-            tokens = word_tokenize(joined)
+            tokens = word_tokenize(" ".join(parts))
             for t in tokens:
                 if t.isalnum() and len(t) > 1:
-                    for form in permutations_case(t):
-                        words.add(form)
+                    words.update(permutations_case(t))
         except Exception:
             pass
 
-    words_list = sorted(words)
-    if len(words_list) > max_words:
-        words_list = words_list[:max_words]
-    return words_list
+    # cap total
+    return sorted(words)[:max_words]
+
 
 def analyze_password(password, user_inputs=None):
-    user_inputs = user_inputs or []
+    """Analyze password using zxcvbn."""
     try:
-        return zxcvbn(password, user_inputs=user_inputs)
+        return zxcvbn(password, user_inputs=user_inputs or [])
     except Exception:
-        return {"score": 0, "crack_times_display": {}, "feedback": {"warning":"zxcvbn error","suggestions":[]}}
+        return {"score": 0, "crack_times_display": {}, "feedback": {"warning": "zxcvbn error", "suggestions": []}}
+
 
 def save_wordlist(words, outpath="wordlist.txt", gzip_out=False):
+    """Save wordlist to .txt or .gz file."""
     if gzip_out:
         if not outpath.endswith(".gz"):
-            outpath = outpath + ".gz"
+            outpath += ".gz"
         with gzip.open(outpath, "wt", encoding="utf-8") as f:
-            for w in words:
-                f.write(w + "\n")
+            f.writelines(w + "\n" for w in words)
     else:
         with open(outpath, "w", encoding="utf-8") as f:
-            for w in words:
-                f.write(w + "\n")
+            f.writelines(w + "\n" for w in words)
     return outpath
 
+
 def interactive_collect(existing_parts=None):
-    """Ask user questions interactively, returns parts list and years list."""
+    """Interactively collect inputs for wordlist generation."""
     existing_parts = existing_parts or []
-    print("\n--- Interactive Wordlist Input 📝 (press Enter to skip a field) ---")
+    print("\n--- Interactive Wordlist Input 📝 (press Enter to skip) ---")
+
     if existing_parts:
         print("Existing inputs detected from CLI:", existing_parts)
-        more = input("Do you want to add more data interactively? [Y/n] 🤔: ").strip().lower()
-        if more == "n":
-            edit = input("Press Enter to keep them, or type comma-separated additional words ✍️: ").strip()
-            if edit:
-                extras = [x.strip() for x in edit.split(",") if x.strip()]
-                existing_parts.extend(extras)
+        if input("Add more data interactively? [Y/n]: ").strip().lower() == "n":
+            extra = input("Add additional comma-separated words: ").strip()
+            if extra:
+                existing_parts.extend([x.strip() for x in extra.split(",") if x.strip()])
             return existing_parts, []
-    # collect fresh
-    names = input("👤 Name(s) (comma-separated): ").strip()
-    pets = input("🐶 Pet name(s) (comma-separated): ").strip()
-    favorites = input("⭐ Favorite things (comma-separated): ").strip()
-    dobs = input("📅 DOB or important dates (comma-separated, e.g., 20010101 or 2001): ").strip()
-    extra = input("🆕 Any other words (comma-separated): ").strip()
-    years_raw = input("📆 Years or year range (e.g., '1990 2025' or '2018,2019') (press Enter to skip): ").strip()
+
+    # fresh inputs
+    names = input("👤 Name(s): ").strip()
+    pets = input("🐶 Pet name(s): ").strip()
+    favorites = input("⭐ Favorite things: ").strip()
+    dobs = input("📅 DOB / Dates (YYYYMMDD or YYYY): ").strip()
+    extra = input("🆕 Any extra words: ").strip()
+    years_raw = input("📆 Years (e.g., '1990 2025' or '2018,2019'): ").strip()
 
     parts = existing_parts.copy()
-    for s in (names, pets, favorites, dobs, extra):
-        if s:
-            parts.extend([x.strip() for x in s.replace(",", " ").split() if x.strip()])
+    for field in (names, pets, favorites, dobs, extra):
+        if field:
+            parts.extend([x.strip() for x in field.replace(",", " ").split() if x.strip()])
 
-    years = []
-    if years_raw:
-        tokens = years_raw.replace(",", " ").split()
-        if len(tokens) == 2:
-            years = expand_years(tokens)
-        else:
-            try:
-                years = [int(t) for t in tokens]
-            except:
-                years = []
-
+    years = expand_years(years_raw.replace(",", " ").split()) if years_raw else []
     return parts, years
 
-    # collect fresh
-    names = input("Name(s) (comma-separated): ").strip()
-    pets = input("Pet name(s) (comma-separated): ").strip()
-    favorites = input("Favorite things (comma-separated): ").strip()
-    dobs = input("DOB or important dates (comma-separated, e.g., 20010101 or 2001): ").strip()
-    extra = input("Any other words (comma-separated): ").strip()
-    years_raw = input("Years or year range (e.g., '1990 2025' for range or '2018,2019' for list) (press Enter to skip): ").strip()
-
-    parts = existing_parts.copy()
-    for s in (names, pets, favorites, dobs, extra):
-        if s:
-            parts.extend([x.strip() for x in s.replace(",", " ").split() if x.strip()])
-
-    years = []
-    if years_raw:
-        # support "1990 2025" or comma separated
-        tokens = years_raw.replace(",", " ").split()
-        if len(tokens) == 2:
-            years = expand_years(tokens)
-        else:
-            try:
-                years = [int(t) for t in tokens]
-            except:
-                years = []
-
-    return parts, years
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Password Strength Analyzer & Custom Wordlist Generator (production-grade + interactive)")
-    p.add_argument("--password", "-p", help="Password to analyze", required=False)
-    p.add_argument("--name", help="Name(s) (space-separated)", nargs="*")
-    p.add_argument("--pet", help="Pet name(s) (space-separated)", nargs="*")
-    p.add_argument("--favorite", help="Favorite things (space-separated)", nargs="*")
-    p.add_argument("--dob", help="DOB or dates (space-separated)", nargs="*")
-    p.add_argument("--extra", help="Extra words to include", nargs="*")
-    p.add_argument("--years", help="Years to append (provide two numbers for a range, or a list)", nargs="+")
-    p.add_argument("--out", help="Output filename (default: wordlist.txt)", default="wordlist.txt")
-    p.add_argument("--gzip", action="store_true", help="Compress output as gzip (.gz)")
-    p.add_argument("--maxwords", type=int, default=MAX_COMBINED_WORDS, help=f"Max words to generate (default {MAX_COMBINED_WORDS})")
-    p.add_argument("--generate-only", action="store_true", help="Only generate wordlist; skip password analysis")
-    p.add_argument("--add-reversed", action="store_true", help="Include reversed variants of parts")
-    p.add_argument("--add-repeats", action="store_true", help="Include repeated-word variants (e.g., name+name, name*3)")
+    """CLI argument parser."""
+    p = argparse.ArgumentParser(description="Password Strength Analyzer & Custom Wordlist Generator")
+    p.add_argument("--password", "-p", help="Password to analyze")
+    p.add_argument("--name", nargs="*", help="Name(s)")
+    p.add_argument("--pet", nargs="*", help="Pet name(s)")
+    p.add_argument("--favorite", nargs="*", help="Favorite things")
+    p.add_argument("--dob", nargs="*", help="DOB or dates")
+    p.add_argument("--extra", nargs="*", help="Extra words")
+    p.add_argument("--years", nargs="+", help="Years to append (range or list)")
+    p.add_argument("--out", default="wordlist.txt", help="Output filename")
+    p.add_argument("--gzip", action="store_true", help="Compress output as .gz")
+    p.add_argument("--maxwords", type=int, default=MAX_COMBINED_WORDS, help="Max words to generate")
+    p.add_argument("--generate-only", action="store_true", help="Skip password analysis")
+    p.add_argument("--add-reversed", action="store_true", help="Add reversed variants")
+    p.add_argument("--add-repeats", action="store_true", help="Add repeated variants (e.g., name+name)")
     return p.parse_args()
+
 
 def main():
     args = parse_args()
 
-    # collect parts from CLI
-    parts = []
-    for group in (args.name, args.pet, args.favorite, args.dob, args.extra):
-        if group:
-            for it in group:
-                cleaned = str(it).strip()
-                if cleaned:
-                    parts.append(cleaned)
-
+    # gather parts
+    parts = [x.strip() for group in (args.name, args.pet, args.favorite, args.dob, args.extra) if group for x in group]
     years = expand_years(args.years) if args.years else []
 
-    # If no parts provided, collect interactive input
     if not parts:
-        parts, interactive_years = interactive_collect([])
+        parts, interactive_years = interactive_collect()
         if interactive_years:
             years = interactive_years
-
-    # If parts exist but user might want to add more interactively
     else:
-        # we ask interactively if they want to add more; interactive_collect handles this
-        parts, interactive_years = interactive_collect(parts)
-        if interactive_years:
-            years = interactive_years
+        parts, extra_years = interactive_collect(parts)
+        if extra_years:
+            years = extra_years
 
-    # Password analysis if requested
     if not args.generate_only and args.password:
-        user_inputs = [p for p in parts]
-        analysis = analyze_password(args.password, user_inputs=user_inputs)
-        print("\n" + "="*60)
-        print("Password analysis for:", args.password)
-        print("Score (0=weak .. 4=strong):", analysis.get("score", "N/A"))
-        print("Crack times (display):")
-        for k, v in analysis.get("crack_times_display", {}).items():
+        print("\n" + "=" * 60)
+        print(f"🔐 Password Analysis for: {args.password}")
+        result = analyze_password(args.password, user_inputs=parts)
+        print(f"Score (0=weak .. 4=strong): {result['score']}")
+        print("Estimated Crack Times:")
+        for k, v in result.get("crack_times_display", {}).items():
             print(f"  {k}: {v}")
-        print("Feedback:")
-        fb = analysis.get("feedback", {})
+        fb = result.get("feedback", {})
         if fb.get("warning"):
-            print("  Warning:", fb.get("warning"))
+            print(f"⚠️  Warning: {fb['warning']}")
         for s in fb.get("suggestions", []):
             print("  -", s)
-        print("="*60)
+        print("=" * 60)
 
-    # Generate wordlist if parts available
+    # generate wordlist
     if parts:
-        print("\nGenerating wordlist from parts:", parts)
+        print("\n🧠 Generating custom wordlist...")
         words = generate_from_parts(parts, years=years, max_words=args.maxwords,
                                     add_reversed=args.add_reversed, add_repeats=args.add_repeats)
-        if not words:
-            print("No words generated. Check your inputs.")
-            sys.exit(1)
-        outpath = save_wordlist(words, outpath=args.out, gzip_out=args.gzip)
-        print(f"Saved {len(words)} words to {outpath}")
+        path = save_wordlist(words, args.out, args.gzip)
+        print(f"✅ Saved {len(words)} words to: {path}")
+        print("\n🎉 Operation complete! You can open the file or use it in password cracking tools.")
     else:
-        if args.generate_only:
-            print("No input parts provided. Use CLI args or run interactively.")
-            sys.exit(1)
-        if not args.password:
-            print("No inputs given. Use --password or provide names/pets/etc.")
-            sys.exit(1)
+        print("No parts provided. Please rerun with CLI args or interactively.")
+
 
 if __name__ == "__main__":
     main()
